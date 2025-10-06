@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Dev Canvas",
+  "version": "1.1.0",
+  "description": "Draw, annotate, and add sticky notes on any webpage — only when you want to.",
+  "permissions": ["scripting", "activeTab", "storage", "contextMenus"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_title": "Toggle Dev Canvas" },
+  "commands": {
+    "toggle-dev-canvas": {
+      "suggested_key": {
+         "default": "Alt+Shift+D",
+         "mac": "Alt+Shift+D"
+      },
+      "description": "Toggle Dev Canvas on the current tab"
+    }
+  },
+  "icons": { "128": "icons/icon128.png" }
+}
