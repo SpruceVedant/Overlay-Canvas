@@ -40,6 +40,7 @@
     alignItems:'center', zIndex:Z+1, pointerEvents:'auto', boxShadow:'0 6px 24px rgba(0,0,0,.35)'
   });
   bar.innerHTML = `
+    <button data-b="select">🖱 Select</button>
     <button data-b="pen">✏️ Pen</button>
     <button data-b="eraser">🧽 Eraser</button>
     <button data-b="rect">▭ Rect</button>
