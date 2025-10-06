@@ -11,28 +11,22 @@
   const KEY = 'devcanvas@' + location.origin + location.pathname;
   const Z = 2147483000;
 
-  // Root overlay (non-blocking) — start HIDDEN
+  // ---------- DOM ----------
   const root = document.createElement('div');
-  Object.assign(root.style, {
-    position: 'fixed', inset: 0, zIndex: Z, pointerEvents: 'none',
-    display: 'none' // <— start hidden
-  });
+  Object.assign(root.style, { position:'fixed', inset:0, zIndex:Z, pointerEvents:'none', display:'none' });
   document.body.appendChild(root);
 
-  // Canvas (receives input)
   const cvs = document.createElement('canvas');
   const ctx = cvs.getContext('2d');
-  Object.assign(cvs.style, { position: 'absolute', inset: 0, pointerEvents: 'auto', cursor: 'crosshair' });
+  Object.assign(cvs.style, { position:'absolute', inset:0, pointerEvents:'auto', cursor:'default' });
   root.appendChild(cvs);
 
-  // Notes layer DOES NOT block clicks; only notes do.
   const notesLayer = document.createElement('div');
-  Object.assign(notesLayer.style, { position: 'absolute', inset: 0, pointerEvents: 'none' });
+  Object.assign(notesLayer.style, { position:'absolute', inset:0, pointerEvents:'none' });
   root.appendChild(notesLayer);
 
-  // Toolbar
   const bar = document.createElement('div');
-  bar.setAttribute('data-devcanvas-ui', '');
+  bar.setAttribute('data-devcanvas-ui','');
   Object.assign(bar.style, {
     position:'fixed', top:'12px', left:'50%', transform:'translateX(-50%)',
     background:'rgba(22,22,26,.92)', color:'#fff', font:'12px system-ui, sans-serif',
@@ -45,7 +39,7 @@
     <button data-b="eraser">🧽 Eraser</button>
     <button data-b="rect">▭ Rect</button>
     <button data-b="arrow">➤ Arrow</button>
-    <button data-b="note" title="Click to add note. Type to edit. Alt+Drag to move">🗒️ Note</button>
+    <button data-b="note" title="Click to add note. Drag with Select (or Alt+Drag)">🗒️ Note</button>
     <span style="width:1px;height:18px;background:#444;margin:0 2px"></span>
     <button data-b="sizeDown">−</button>
     <span id="sizeLabel" style="min-width:30px;text-align:center">6</span>
@@ -67,37 +61,41 @@
   });
   root.appendChild(bar);
 
-  // Toggle FAB
   const fab = document.createElement('div');
-  fab.setAttribute('data-devcanvas-ui', '');
+  fab.setAttribute('data-devcanvas-ui','');
   Object.assign(fab.style, {
     position:'fixed', right:'14px', bottom:'14px', width:'16px', height:'16px',
     borderRadius:'50%', background:'#7c5cff', boxShadow:'0 4px 16px rgba(0,0,0,.35)',
     zIndex:Z+2, cursor:'pointer', pointerEvents:'auto', opacity:.7
   });
-  fab.title = 'Toggle Dev Canvas (in-page hotkey or extension shortcut)';
+  fab.title = 'Toggle Dev Canvas';
   document.body.appendChild(fab);
 
   // ---------- STATE ----------
-  let active = false;// fixed bug
-  let tool = 'pen', color = '#ff4757', size = 6;
+  let active = false;
+  let tool = 'select';
+  let color = '#ff4757', size = 6;
+
+  const items = [];
+  const redoStack = [];
+  const notes = []; 
+  const selection = new Set();
+
   let drawing = false, tmpStart=null, tmpRect=null, tmpArrow=null;
   let draggingNote = null, dragOff = {x:0,y:0};
+  let draggingSel = false, dragSelStart = null;
 
-  const strokes = []; const redoStack = []; const notes = [];
   const sizeLabel = () => (bar.querySelector('#sizeLabel').textContent = String(size));
 
-  // ---------- UTILS ----------
-  const toast = (msg) => {
-    const t = document.createElement('div');
-    Object.assign(t.style, {
-      position:'fixed', left:'50%', bottom:'40px', transform:'translateX(-50%)',
-      background:'rgba(20,20,24,.95)', color:'#fff', padding:'8px 12px', borderRadius:'10px',
-      font:'12px system-ui, sans-serif', zIndex:Z+3, pointerEvents:'none'
-    });
-    t.textContent = msg; document.body.appendChild(t);
-    setTimeout(()=>t.remove(), 1100);
-  };
+  // ---------- HELPERS ----------
+  const uid = () => Math.random().toString(36).slice(2,9);
+
+  function updateCursors() {
+    if (tool === 'select') cvs.style.cursor = 'default';
+    else if (tool === 'pen' || tool === 'eraser' || tool === 'rect' || tool === 'arrow' || tool === 'note')
+      cvs.style.cursor = 'crosshair';
+    notes.forEach(n => { if (n._el) n._el.style.cursor = (tool==='select') ? 'move' : 'text'; });
+  }
 
   const fit = () => {
     const w = Math.floor(innerWidth * DPR), h = Math.floor(innerHeight * DPR);
@@ -113,36 +111,103 @@
     return { x:(e.clientX-b.left)*DPR, y:(e.clientY-b.top)*DPR };
   };
 
-  // ---------- DRAWING ----------
-  const drawStroke = (s) => {
+  
+  function bbox(it){
+    if (it.type==='rect'){
+      const x = Math.min(it.x, it.x+it.w), y = Math.min(it.y, it.y+it.h);
+      const w = Math.abs(it.w), h = Math.abs(it.h);
+      return {x,y,w,h};
+    }
+    if (it.type==='arrow'){
+      const x = Math.min(it.x1, it.x2), y = Math.min(it.y1, it.y2);
+      const w = Math.abs(it.x2-it.x1), h = Math.abs(it.y2-it.y1);
+      return {x,y,w,h};
+    }
+    if (it.type==='pen'){
+      let minx=Infinity,miny=Infinity,maxx=-Infinity,maxy=-Infinity;
+      it.points.forEach(p=>{minx=Math.min(minx,p.x); miny=Math.min(miny,p.y); maxx=Math.max(maxx,p.x); maxy=Math.max(maxy,p.y);});
+      return {x:minx,y:miny,w:maxx-minx,h:maxy-miny};
+    }
+    return {x:0,y:0,w:0,h:0};
+  }
+
+  const distToSeg = (px,py,x1,y1,x2,y2) => {
+    const dx=x2-x1, dy=y2-y1;
+    if (dx===0 && dy===0) return Math.hypot(px-x1,py-y1);
+    const t = Math.max(0, Math.min(1, ((px-x1)*dx+(py-y1)*dy)/(dx*dx+dy*dy)));
+    const x = x1 + t*dx, y = y1 + t*dy;
+    return Math.hypot(px-x, py-y);
+  };
+
+  function hitTest(it, x, y){
+    const tol = Math.max(6, it.size*DPR*1.5);
+    if (it.type==='rect'){
+      const r = bbox(it);
+      return x>=r.x-tol && x<=r.x+r.w+tol && y>=r.y-tol && y<=r.y+r.h+tol;
+    }
+    if (it.type==='arrow'){
+      const d = distToSeg(x,y,it.x1,it.y1,it.x2,it.y2);
+      return d <= tol;
+    }
+    if (it.type==='pen'){
+      const pts = it.points;
+      for (let i=1;i<pts.length;i++){
+        if (distToSeg(x,y,pts[i-1].x,pts[i-1].y,pts[i].x,pts[i].y) <= tol) return true;
+      }
+      return false;
+    }
+    return false;
+  }
+
+  function topHit(x,y){
+    for (let i=items.length-1;i>=0;i--){
+      if (hitTest(items[i], x,y)) return items[i];
+    }
+    return null;
+  }
+
+  // ---------- RENDER ----------
+  function drawItem(it){
     ctx.save();
-    if (s.tool==='pen' || s.tool==='eraser') {
-      ctx.globalCompositeOperation = (s.tool==='eraser') ? 'destination-out' : 'source-over';
-      ctx.strokeStyle = s.color; ctx.lineWidth = s.size * DPR;
-      ctx.beginPath(); ctx.moveTo(s.points[0].x, s.points[0].y);
-      for (let i=1;i<s.points.length;i++) ctx.lineTo(s.points[i].x, s.points[i].y);
+    if (it.type==='pen'){
+      ctx.globalCompositeOperation = (it.eraser) ? 'destination-out' : 'source-over';
+      ctx.strokeStyle = it.color; ctx.lineWidth = it.size * DPR;
+      ctx.beginPath(); ctx.moveTo(it.points[0].x, it.points[0].y);
+      for (let i=1;i<it.points.length;i++) ctx.lineTo(it.points[i].x, it.points[i].y);
       ctx.stroke();
-    } else if (s.tool==='rect') {
-      ctx.globalCompositeOperation = 'source-over';
-      ctx.strokeStyle = s.color; ctx.lineWidth = s.size * DPR;
-      ctx.strokeRect(s.x, s.y, s.w, s.h);
-    } else if (s.tool==='arrow') {
-      ctx.globalCompositeOperation = 'source-over';
-      ctx.strokeStyle = s.color; ctx.lineWidth = s.size * DPR;
-      ctx.beginPath(); ctx.moveTo(s.x1, s.y1); ctx.lineTo(s.x2, s.y2); ctx.stroke();
-      const angle = Math.atan2(s.y2 - s.y1, s.x2 - s.x1);
-      const headLen = 10 * DPR + s.size * DPR * 1.5;
+    } else if (it.type==='rect'){
+      ctx.strokeStyle = it.color; ctx.lineWidth = it.size * DPR;
+      ctx.strokeRect(it.x, it.y, it.w, it.h);
+    } else if (it.type==='arrow'){
+      ctx.strokeStyle = it.color; ctx.lineWidth = it.size * DPR;
+      ctx.beginPath(); ctx.moveTo(it.x1, it.y1); ctx.lineTo(it.x2, it.y2); ctx.stroke();
+      const angle = Math.atan2(it.y2 - it.y1, it.x2 - it.x1);
+      const headLen = 10 * DPR + it.size * DPR * 1.5;
       for (const a of [angle - Math.PI/7, angle + Math.PI/7]) {
-        ctx.beginPath(); ctx.moveTo(s.x2, s.y2);
-        ctx.lineTo(s.x2 - headLen*Math.cos(a), s.y2 - headLen*Math.sin(a)); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(it.x2, it.y2);
+        ctx.lineTo(it.x2 - headLen*Math.cos(a), it.y2 - headLen*Math.sin(a)); ctx.stroke();
       }
     }
     ctx.restore();
-  };
+  }
 
-  const redraw = () => {
+  function drawSelection(){
+    if (selection.size===0) return;
+    ctx.save();
+    ctx.setLineDash([6,4]);
+    ctx.lineWidth = 1 * DPR;
+    ctx.strokeStyle = '#6aa0ff';
+    selection.forEach(id=>{
+      const it = items.find(o=>o.id===id); if(!it) return;
+      const r = bbox(it);
+      ctx.strokeRect(r.x-4, r.y-4, r.w+8, r.h+8);
+    });
+    ctx.restore();
+  }
+
+  function redraw(){
     ctx.clearRect(0,0,cvs.width,cvs.height);
-    for (const s of strokes) drawStroke(s);
+    for (const it of items) drawItem(it);
     if (drawing && tool==='rect' && tmpRect){
       ctx.save(); ctx.setLineDash([8,4]); ctx.strokeStyle = color; ctx.lineWidth = size * DPR;
       ctx.strokeRect(tmpRect.x, tmpRect.y, tmpRect.w, tmpRect.h); ctx.restore();
@@ -152,7 +217,8 @@
       ctx.beginPath(); ctx.moveTo(tmpArrow.x1, tmpArrow.y1); ctx.lineTo(tmpArrow.x2, tmpArrow.y2); ctx.stroke();
       ctx.restore();
     }
-  };
+    drawSelection();
+  }
 
   // ---------- NOTES ----------
   const createNoteEl = (model) => {
@@ -160,30 +226,30 @@
     el.setAttribute('data-devcanvas-note','');
     el.contentEditable = 'true';
     el.textContent = model.text || 'Note…';
-    el.title = 'Type to edit • Alt+Drag to move';
+    el.title = 'Type to edit • Drag with Select (or Alt+Drag)';
     Object.assign(el.style, {
       position:'absolute', minWidth:'120px', maxWidth:'260px',
       padding:'8px 10px', background:'#fff8a8', color:'#222',
       border:'1px solid #e6d36a', borderRadius:'8px', boxShadow:'0 6px 18px rgba(0,0,0,.15)',
       font:'13px system-ui, sans-serif', lineHeight:'1.3',
-      pointerEvents:'auto', cursor:'text'
+      pointerEvents:'auto', cursor:(tool==='select')?'move':'text'
     });
-
     for (const type of ['keydown','keypress','keyup']) el.addEventListener(type, ev => ev.stopPropagation());
     el.addEventListener('click', ev => ev.stopPropagation());
     el.addEventListener('input', () => model.text = el.innerText);
-
     el.addEventListener('mousedown', (e) => {
-      if (!e.altKey) return;
-      draggingNote = { el, model }; el.style.cursor='grabbing';
+      const canDrag = (tool==='select') || e.altKey;
+      if (!canDrag) return;
+      draggingNote = { el, model };
+      el.style.cursor='grabbing';
       const r = el.getBoundingClientRect();
       dragOff.x = e.clientX - r.left; dragOff.y = e.clientY - r.top;
       e.preventDefault(); e.stopPropagation();
     });
-    el.addEventListener('mouseup', () => { draggingNote = null; el.style.cursor='text'; });
-
+    el.addEventListener('mouseup', () => { draggingNote = null; el.style.cursor=(tool==='select')?'move':'text'; });
     notesLayer.appendChild(el);
     model._el = el;
+    updateCursors();
     return el;
   };
 
@@ -208,23 +274,43 @@
   const onDown = (e) => {
     if (!active || e.button!==0) return;
     if (e.target.closest('[data-devcanvas-ui]')) return;
+
     if (e.target.closest('[data-devcanvas-note]')) return;
 
-    if (tool==='note') {
-      addNoteAt(e.clientX, e.clientY);
-      toast('Note added. Type to edit. Alt+Drag to move.');
+    const p = pt(e);
+
+    if (tool==='select'){
+      const hit = topHit(p.x, p.y);
+      if (hit){
+        if (!e.shiftKey && !selection.has(hit.id)) { selection.clear(); }
+        selection.add(hit.id);
+     
+        dragSelStart = { x:p.x, y:p.y, start: items.filter(it=>selection.has(it.id)).map(it=>({id:it.id, snapshot: structuredClone(it)})) };
+        draggingSel = true;
+        redraw();
+      } else {
+        selection.clear();
+        redraw();
+      }
       return;
     }
 
-    drawing = true; redoStack.length = 0;
-    tmpStart = pt(e);
+    // NOTE TOOL
+    if (tool==='note') {
+      addNoteAt(e.clientX, e.clientY);
+      return;
+    }
+
+    // DRAWING TOOLS
+    drawing = true; redoStack.length = 0; selection.clear();
+    tmpStart = p;
 
     if (tool==='pen' || tool==='eraser') {
-      strokes.push({tool, color, size, points:[tmpStart]});
+      items.push({ id:uid(), type:'pen', color, size, eraser:(tool==='eraser'), points:[p] });
     } else if (tool==='rect') {
-      tmpRect = {x: tmpStart.x, y: tmpStart.y, w:0, h:0};
+      tmpRect = { x:p.x, y:p.y, w:0, h:0 };
     } else if (tool==='arrow') {
-      tmpArrow = {x1: tmpStart.x, y1: tmpStart.y, x2: tmpStart.x, y2: tmpStart.y};
+      tmpArrow = { x1:p.x, y1:p.y, x2:p.x, y2:p.y };
     }
   };
 
@@ -237,62 +323,100 @@
       model.xPct = left / innerWidth; model.yPct = top / innerHeight;
       return;
     }
+
+    if (draggingSel && dragSelStart){
+      const p = pt(e); const dx = p.x - dragSelStart.x; const dy = p.y - dragSelStart.y;
+      for (const {id, snapshot} of dragSelStart.start){
+        const it = items.find(o=>o.id===id); if(!it) continue;
+        if (it.type==='rect'){ it.x = snapshot.x + dx; it.y = snapshot.y + dy; }
+        if (it.type==='arrow'){ it.x1 = snapshot.x1 + dx; it.y1 = snapshot.y1 + dy; it.x2 = snapshot.x2 + dx; it.y2 = snapshot.y2 + dy; }
+        if (it.type==='pen'){ it.points = snapshot.points.map(pt=>({x:pt.x+dx, y:pt.y+dy})); }
+      }
+      redraw();
+      return;
+    }
+
     if (!drawing || !active) return;
 
+    const p = pt(e);
     if (tool==='pen' || tool==='eraser') {
-      const s = strokes[strokes.length-1];
-      s.points.push(pt(e));
-      drawStroke(s);
+      const it = items[items.length-1];
+      it.points.push(p);
+      drawItem(it);
+      drawSelection(); 
     } else if (tool==='rect') {
-      const p = pt(e); tmpRect.w = p.x - tmpRect.x; tmpRect.h = p.y - tmpRect.y; redraw();
+      tmpRect.w = p.x - tmpRect.x; tmpRect.h = p.y - tmpRect.y; redraw();
     } else if (tool==='arrow') {
-      const p = pt(e); tmpArrow.x2 = p.x; tmpArrow.y2 = p.y; redraw();
+      tmpArrow.x2 = p.x; tmpArrow.y2 = p.y; redraw();
     }
   };
 
   const onUp = () => {
+    if (draggingSel){ draggingSel=false; dragSelStart=null; return; }
     if (!drawing) return; drawing = false;
+
     if (tool==='rect' && tmpRect) {
-      let {x,y,w,h} = tmpRect; if (w<0){x+=w; w*=-1;} if (h<0){y+=h; h*=-1;}
-      strokes.push({tool:'rect', color, size, x,y,w,h}); tmpRect = null; redraw();
+      const it = { id:uid(), type:'rect', color, size, x:tmpRect.x, y:tmpRect.y, w:tmpRect.w, h:tmpRect.h };
+      items.push(it); tmpRect=null; redraw();
     }
     if (tool==='arrow' && tmpArrow) {
-      strokes.push({tool:'arrow', color, size, ...tmpArrow}); tmpArrow = null; redraw();
+      const it = { id:uid(), type:'arrow', color, size, ...tmpArrow };
+      items.push(it); tmpArrow=null; redraw();
     }
   };
 
   const onKey = (e) => {
-    // toggle ctrl + d
+
     if ((e.ctrlKey||e.metaKey) && e.key.toLowerCase()==='d'){ e.preventDefault(); api.toggle(); }
+
+    // tool hotkeys
+    const k = e.key.toLowerCase();
+    if (k==='s'){ tool='select'; updateCursors(); }
+    if (k==='1'){ tool='pen';    updateCursors(); }
+    if (k==='2'){ tool='eraser'; updateCursors(); }
+    if (k==='3'){ tool='rect';   updateCursors(); }
+    if (k==='4'){ tool='arrow';  updateCursors(); }
+    if (k==='5'){ tool='note';   updateCursors(); }
+
+    // selection ops
+    if (k==='escape'){ selection.clear(); redraw(); }
+    if ((k==='delete' || k==='backspace') && active){
+      if (selection.size>0){
+        for (const id of [...selection]) {
+          const idx = items.findIndex(i=>i.id===id);
+          if (idx>=0) items.splice(idx,1);
+        }
+        selection.clear(); redraw();
+        e.preventDefault();
+      }
+    }
+
     if (!active) return;
-    if ((e.ctrlKey||e.metaKey) && e.key.toLowerCase()==='z'){ e.preventDefault(); bar.querySelector('[data-b=undo]').click(); }
-    if ((e.ctrlKey||e.metaKey) && e.shiftKey && e.key.toLowerCase()==='z'){ e.preventDefault(); bar.querySelector('[data-b=redo]').click(); }
-    if (e.key==='Escape'){ api.toggle(false); }
-    if (e.key==='['){ size=Math.max(1, size-1); sizeLabel(); }
-    if (e.key===']'){ size=Math.min(50, size+1); sizeLabel(); }
-    if (e.key==='1') tool='pen';
-    if (e.key==='2') tool='eraser';
-    if (e.key==='3') tool='rect';
-    if (e.key==='4') tool='arrow';
-    if (e.key==='5') tool='note';
+    if ((e.ctrlKey||e.metaKey) && k==='z'){ e.preventDefault(); }
+    if ((e.ctrlKey||e.metaKey) && e.shiftKey && k==='z'){ e.preventDefault(); /* redo */ }
+    if (k==='['){ size=Math.max(1, size-1); sizeLabel(); }
+    if (k===']'){ size=Math.min(50, size+1); sizeLabel(); }
   };
 
-  // Toolbar handlers
+  // ---------- TOOLBAR ----------
   bar.addEventListener('click', (e)=>{
     const b = e.target.closest('[data-b]'); if(!b) return;
     const id = b.getAttribute('data-b');
-    if (id==='pen') tool='pen';
-    if (id==='eraser') tool='eraser';
-    if (id==='rect') tool='rect';
-    if (id==='arrow') tool='arrow';
-    if (id==='note') tool='note';
+    if (id==='select'){ tool='select'; updateCursors(); return; }
+    if (id==='pen')   { tool='pen';    updateCursors(); return; }
+    if (id==='eraser'){ tool='eraser'; updateCursors(); return; }
+    if (id==='rect')  { tool='rect';   updateCursors(); return; }
+    if (id==='arrow') { tool='arrow';  updateCursors(); return; }
+    if (id==='note')  { tool='note';   updateCursors(); return; }
+
     if (id==='sizeUp'){ size=Math.min(50, size+1); sizeLabel(); }
     if (id==='sizeDown'){ size=Math.max(1, size-1); sizeLabel(); }
-    if (id==='undo'){ const s = strokes.pop(); if (s){ redoStack.push(s); redraw(); } }
-    if (id==='redo'){ const s = redoStack.pop(); if (s){ strokes.push(s); redraw(); } }
+    if (id==='undo'){ }
+    if (id==='redo'){ }
     if (id==='clear'){
-      strokes.length=0; redoStack.length=0; ctx.clearRect(0,0,cvs.width,cvs.height);
+      items.length=0; ctx.clearRect(0,0,cvs.width,cvs.height);
       notes.length=0; [...notesLayer.children].forEach(c=>c.remove());
+      selection.clear();
     }
     if (id==='save'){ save(); }
     if (id==='export'){ exportPNG(); }
@@ -301,11 +425,12 @@
 
   bar.querySelector('input[type=color]').addEventListener('input', (e)=>{ color = e.target.value; });
 
-
+  // ---------- PERSISTENCE ----------
   const save = () => {
     try {
       const modelNotes = notes.map(n=>({xPct:n.xPct,yPct:n.yPct,text:n.text||''}));
-      localStorage.setItem(KEY, JSON.stringify({version:4, strokes, notes:modelNotes}));
+      const payload = { version: 6, items, notes:modelNotes };
+      localStorage.setItem(KEY, JSON.stringify(payload));
       toast('Saved for this URL');
     } catch(e){ console.warn(e); toast('Save failed'); }
   };
@@ -314,8 +439,20 @@
     const raw = localStorage.getItem(KEY); if(!raw) return;
     try {
       const parsed = JSON.parse(raw);
-      if (parsed?.strokes) strokes.splice(0, strokes.length, ...parsed.strokes);
-      if (parsed?.notes) { notes.splice(0, notes.length, ...parsed.notes); layoutNotes(); }
+     
+      if (parsed?.strokes && !parsed.items){
+        parsed.items = parsed.strokes.map(s=>{
+          if (s.tool==='rect') return { id:uid(), type:'rect', color:s.color, size:s.size, x:s.x, y:s.y, w:s.w, h:s.h };
+          if (s.tool==='arrow') return { id:uid(), type:'arrow', color:s.color, size:s.size, x1:s.x1, y1:s.y1, x2:s.x2, y2:s.y2 };
+          if (s.tool==='pen' || s.tool==='eraser') return { id:uid(), type:'pen', color:s.color, size:s.size, eraser:(s.tool==='eraser'), points:s.points };
+          return null;
+        }).filter(Boolean);
+      }
+      if (parsed?.items) { items.splice(0, items.length, ...parsed.items); }
+      if (parsed?.notes) {
+        notes.splice(0, notes.length, ...parsed.notes);
+        layoutNotes();
+      }
       redraw();
     } catch(e){ console.warn('load failed', e); }
   };
@@ -324,7 +461,8 @@
     const temp = document.createElement('canvas');
     temp.width = cvs.width; temp.height = cvs.height;
     const tctx = temp.getContext('2d');
-    tctx.drawImage(cvs, 0, 0);
+    items.forEach(drawItem.bind({ctx:tctx}) || drawItem);
+    tctx.drawImage(cvs, 0, 0); 
     tctx.font = `${13*DPR}px system-ui`;
     for (const n of notes) {
       const x = n.xPct * innerWidth * DPR;
@@ -339,7 +477,7 @@
     const a = document.createElement('a'); a.download = 'dev-canvas.png'; a.href = temp.toDataURL('image/png'); a.click();
   };
 
-
+  // ---------- API + messaging ----------
   const api = {
     toggle(force){
       const desired = (typeof force === 'boolean') ? force : !active;
@@ -347,7 +485,8 @@
       root.style.display = active ? 'block' : 'none';
       fab.style.opacity = active ? .7 : 1;
       root.style.pointerEvents = active ? 'auto' : 'none';
-      // toast(active ? 'Dev Canvas ON' : 'Dev Canvas OFF'); 
+      updateCursors();
+      redraw();
     },
     destroy(){
       window.removeEventListener('keydown', onKey);
@@ -361,13 +500,12 @@
   };
   window.__devCanvas = api;
 
- 
   chrome.runtime?.onMessage?.addListener((msg, _s, sendResponse) => {
     if (msg?.type === "DEV_CANVAS_PING") sendResponse("pong");
     if (msg?.type === "DEV_CANVAS_TOGGLE") api.toggle();
   });
 
-  
+  // ---------- BINDINGS ----------
   window.addEventListener('mousedown', onDown);
   window.addEventListener('mousemove', onMove);
   window.addEventListener('mouseup', onUp);
@@ -376,6 +514,5 @@
   fab.addEventListener('click', ()=>api.toggle());
 
  
-  fit(); load(); sizeLabel();
-
+  fit(); load(); sizeLabel(); updateCursors();
 })();
