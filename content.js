@@ -505,7 +505,6 @@
     if (msg?.type === "DEV_CANVAS_TOGGLE") api.toggle();
   });
 
-  // ---------- BINDINGS ----------
   window.addEventListener('mousedown', onDown);
   window.addEventListener('mousemove', onMove);
   window.addEventListener('mouseup', onUp);
