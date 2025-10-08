@@ -1,4 +1,5 @@
 (() => {
+  // If already loaded, just wire the message listener and bail.
   if (window.__devCanvas && window.__devCanvas.toggle) {
     chrome.runtime?.onMessage?.addListener((msg, _s, sendResponse) => {
       if (msg?.type === "DEV_CANVAS_PING") sendResponse("pong");
@@ -13,22 +14,33 @@
 
   // ---------- DOM ----------
   const root = document.createElement('div');
-  Object.assign(root.style, { position:'fixed', inset:0, zIndex:Z, pointerEvents:'none', display:'none' });
-  document.body.appendChild(root);
+  // Page-anchored (scrolls with the page)
+  Object.assign(root.style, {
+    position: 'absolute',
+    top: '0px',
+    left: '0px',
+    width: document.documentElement.scrollWidth + 'px',
+    height: document.documentElement.scrollHeight + 'px',
+    zIndex: Z,
+    pointerEvents: 'none',
+    display: 'none'
+  });
+  document.documentElement.appendChild(root);
 
   const cvs = document.createElement('canvas');
   const ctx = cvs.getContext('2d');
-  Object.assign(cvs.style, { position:'absolute', inset:0, pointerEvents:'auto', cursor:'default' });
+  Object.assign(cvs.style, { position: 'absolute', inset: 0, pointerEvents: 'auto', cursor: 'default' });
   root.appendChild(cvs);
 
   const notesLayer = document.createElement('div');
-  Object.assign(notesLayer.style, { position:'absolute', inset:0, pointerEvents:'none' });
+  Object.assign(notesLayer.style, { position: 'absolute', inset: 0, pointerEvents: 'none' });
   root.appendChild(notesLayer);
 
   const bar = document.createElement('div');
   bar.setAttribute('data-devcanvas-ui','');
   Object.assign(bar.style, {
-    position:'fixed', top:'12px', left:'50%', transform:'translateX(-50%)',
+    position:'fixed', // UI stays pinned for convenience
+    top:'12px', left:'50%', transform:'translateX(-50%)',
     background:'rgba(22,22,26,.92)', color:'#fff', font:'12px system-ui, sans-serif',
     padding:'8px 10px', borderRadius:'12px', display:'flex', gap:'8px',
     alignItems:'center', zIndex:Z+1, pointerEvents:'auto', boxShadow:'0 6px 24px rgba(0,0,0,.35)'
@@ -59,7 +71,7 @@
     b.onmouseenter=()=>b.style.background='#3a3f47';
     b.onmouseleave=()=>b.style.background='#2b2f36';
   });
-  root.appendChild(bar);
+  document.body.appendChild(bar);
 
   const fab = document.createElement('div');
   fab.setAttribute('data-devcanvas-ui','');
@@ -76,42 +88,62 @@
   let tool = 'select';
   let color = '#ff4757', size = 6;
 
-  const items = [];
+  const items = [];   // vector items: {id,type,color,size,...} in PAGE coordinates
   const redoStack = [];
-  const notes = []; 
-  const selection = new Set();
+  const notes = [];   // {x,y,text,_el} in PAGE coordinates
+  const selection = new Set(); // selected item ids
 
   let drawing = false, tmpStart=null, tmpRect=null, tmpArrow=null;
   let draggingNote = null, dragOff = {x:0,y:0};
   let draggingSel = false, dragSelStart = null;
 
   const sizeLabel = () => (bar.querySelector('#sizeLabel').textContent = String(size));
-
-  // ---------- HELPERS ----------
   const uid = () => Math.random().toString(36).slice(2,9);
 
+  // ---------- HELPERS ----------
   function updateCursors() {
-    if (tool === 'select') cvs.style.cursor = 'default';
-    else if (tool === 'pen' || tool === 'eraser' || tool === 'rect' || tool === 'arrow' || tool === 'note')
-      cvs.style.cursor = 'crosshair';
+    cvs.style.cursor =
+      (tool === 'pen' || tool === 'eraser' || tool === 'rect' || tool === 'arrow' || tool === 'note')
+        ? 'crosshair' : 'default';
     notes.forEach(n => { if (n._el) n._el.style.cursor = (tool==='select') ? 'move' : 'text'; });
   }
 
+  function toast(msg) {
+    const t = document.createElement('div');
+    Object.assign(t.style, {
+      position:'fixed', left:'50%', bottom:'40px', transform:'translateX(-50%)',
+      background:'rgba(20,20,24,.95)', color:'#fff', padding:'8px 12px', borderRadius:'10px',
+      font:'12px system-ui, sans-serif', zIndex:Z+3, pointerEvents:'none'
+    });
+    t.textContent = msg; document.body.appendChild(t);
+    setTimeout(()=>t.remove(), 1000);
+  }
+
+  const docW = () => Math.max(document.documentElement.scrollWidth, document.documentElement.clientWidth);
+  const docH = () => Math.max(document.documentElement.scrollHeight, document.documentElement.clientHeight);
+
   const fit = () => {
-    const w = Math.floor(innerWidth * DPR), h = Math.floor(innerHeight * DPR);
-    cvs.width = w; cvs.height = h;
-    cvs.style.width = innerWidth + 'px';
-    cvs.style.height = innerHeight + 'px';
+    const pageW = docW();
+    const pageH = docH();
+    root.style.width  = pageW + 'px';
+    root.style.height = pageH + 'px';
+
+    cvs.width  = Math.floor(pageW * DPR);
+    cvs.height = Math.floor(pageH * DPR);
+    cvs.style.width  = pageW + 'px';
+    cvs.style.height = pageH + 'px';
+
     ctx.lineCap='round'; ctx.lineJoin='round';
     redraw(); layoutNotes();
   };
 
+  // convert client -> page coords; canvas is at (0,0) page space
   const pt = (e) => {
-    const b = cvs.getBoundingClientRect();
-    return { x:(e.clientX-b.left)*DPR, y:(e.clientY-b.top)*DPR };
+    const r = cvs.getBoundingClientRect(); // r.left ~ -scrollX, r.top ~ -scrollY
+    return { x:(e.clientX - r.left) * DPR, y:(e.clientY - r.top) * DPR };
   };
 
-  
+  // ---------- GEOM / HIT TEST ----------
   function bbox(it){
     if (it.type==='rect'){
       const x = Math.min(it.x, it.x+it.w), y = Math.min(it.y, it.y+it.h);
@@ -249,21 +281,21 @@
     el.addEventListener('mouseup', () => { draggingNote = null; el.style.cursor=(tool==='select')?'move':'text'; });
     notesLayer.appendChild(el);
     model._el = el;
-    updateCursors();
     return el;
   };
 
   const layoutNotes = () => {
     for (const n of notes) {
       const el = n._el || createNoteEl(n);
-      el.style.left = (n.xPct * innerWidth) + 'px';
-      el.style.top  = (n.yPct * innerHeight) + 'px';
+      el.style.left = n.x + 'px';
+      el.style.top  = n.y + 'px';
     }
   };
 
   const addNoteAt = (clientX, clientY) => {
-    const xPct = clientX / innerWidth, yPct = clientY / innerHeight;
-    const m = { xPct, yPct, text: 'Note…' };
+    const x = window.scrollX + clientX;
+    const y = window.scrollY + clientY;
+    const m = { x, y, text: 'Note…' };
     notes.push(m);
     const el = createNoteEl(m);
     layoutNotes();
@@ -274,7 +306,6 @@
   const onDown = (e) => {
     if (!active || e.button!==0) return;
     if (e.target.closest('[data-devcanvas-ui]')) return;
-
     if (e.target.closest('[data-devcanvas-note]')) return;
 
     const p = pt(e);
@@ -282,9 +313,8 @@
     if (tool==='select'){
       const hit = topHit(p.x, p.y);
       if (hit){
-        if (!e.shiftKey && !selection.has(hit.id)) { selection.clear(); }
+        if (!e.shiftKey && !selection.has(hit.id)) selection.clear();
         selection.add(hit.id);
-     
         dragSelStart = { x:p.x, y:p.y, start: items.filter(it=>selection.has(it.id)).map(it=>({id:it.id, snapshot: structuredClone(it)})) };
         draggingSel = true;
         redraw();
@@ -295,16 +325,11 @@
       return;
     }
 
-    // NOTE TOOL
-    if (tool==='note') {
-      addNoteAt(e.clientX, e.clientY);
-      return;
-    }
+    if (tool==='note') { addNoteAt(e.clientX, e.clientY); return; }
 
-    // DRAWING TOOLS
+    // drawing tools
     drawing = true; redoStack.length = 0; selection.clear();
     tmpStart = p;
-
     if (tool==='pen' || tool==='eraser') {
       items.push({ id:uid(), type:'pen', color, size, eraser:(tool==='eraser'), points:[p] });
     } else if (tool==='rect') {
@@ -317,10 +342,10 @@
   const onMove = (e) => {
     if (draggingNote) {
       const {el, model} = draggingNote;
-      const left = e.clientX - dragOff.x;
-      const top  = e.clientY - dragOff.y;
+      const left = e.clientX - dragOff.x + window.scrollX;
+      const top  = e.clientY - dragOff.y + window.scrollY;
       el.style.left = left + 'px'; el.style.top = top + 'px';
-      model.xPct = left / innerWidth; model.yPct = top / innerHeight;
+      model.x = left; model.y = top;
       return;
     }
 
@@ -343,7 +368,7 @@
       const it = items[items.length-1];
       it.points.push(p);
       drawItem(it);
-      drawSelection(); 
+      drawSelection();
     } else if (tool==='rect') {
       tmpRect.w = p.x - tmpRect.x; tmpRect.h = p.y - tmpRect.y; redraw();
     } else if (tool==='arrow') {
@@ -366,10 +391,9 @@
   };
 
   const onKey = (e) => {
-
+    // optional in-page toggle after injection
     if ((e.ctrlKey||e.metaKey) && e.key.toLowerCase()==='d'){ e.preventDefault(); api.toggle(); }
 
-    // tool hotkeys
     const k = e.key.toLowerCase();
     if (k==='s'){ tool='select'; updateCursors(); }
     if (k==='1'){ tool='pen';    updateCursors(); }
@@ -378,7 +402,6 @@
     if (k==='4'){ tool='arrow';  updateCursors(); }
     if (k==='5'){ tool='note';   updateCursors(); }
 
-    // selection ops
     if (k==='escape'){ selection.clear(); redraw(); }
     if ((k==='delete' || k==='backspace') && active){
       if (selection.size>0){
@@ -392,8 +415,8 @@
     }
 
     if (!active) return;
-    if ((e.ctrlKey||e.metaKey) && k==='z'){ e.preventDefault(); }
-    if ((e.ctrlKey||e.metaKey) && e.shiftKey && k==='z'){ e.preventDefault(); /* redo */ }
+    if ((e.ctrlKey||e.metaKey) && k==='z'){ e.preventDefault(); /* vector undo placeholder */ }
+    if ((e.ctrlKey||e.metaKey) && e.shiftKey && k==='z'){ e.preventDefault(); /* redo placeholder */ }
     if (k==='['){ size=Math.max(1, size-1); sizeLabel(); }
     if (k===']'){ size=Math.min(50, size+1); sizeLabel(); }
   };
@@ -411,8 +434,8 @@
 
     if (id==='sizeUp'){ size=Math.min(50, size+1); sizeLabel(); }
     if (id==='sizeDown'){ size=Math.max(1, size-1); sizeLabel(); }
-    if (id==='undo'){ }
-    if (id==='redo'){ }
+    if (id==='undo'){ /* vector undo placeholder */ }
+    if (id==='redo'){ /* redo placeholder */ }
     if (id==='clear'){
       items.length=0; ctx.clearRect(0,0,cvs.width,cvs.height);
       notes.length=0; [...notesLayer.children].forEach(c=>c.remove());
@@ -428,8 +451,8 @@
   // ---------- PERSISTENCE ----------
   const save = () => {
     try {
-      const modelNotes = notes.map(n=>({xPct:n.xPct,yPct:n.yPct,text:n.text||''}));
-      const payload = { version: 6, items, notes:modelNotes };
+      const modelNotes = notes.map(n=>({x:n.x,y:n.y,text:n.text||''}));
+      const payload = { version: 7, items, notes:modelNotes };
       localStorage.setItem(KEY, JSON.stringify(payload));
       toast('Saved for this URL');
     } catch(e){ console.warn(e); toast('Save failed'); }
@@ -439,34 +462,73 @@
     const raw = localStorage.getItem(KEY); if(!raw) return;
     try {
       const parsed = JSON.parse(raw);
-     
+
+      // migrate from old schema (strokes or note xPct/yPct)
       if (parsed?.strokes && !parsed.items){
         parsed.items = parsed.strokes.map(s=>{
-          if (s.tool==='rect') return { id:uid(), type:'rect', color:s.color, size:s.size, x:s.x, y:s.y, w:s.w, h:s.h };
-          if (s.tool==='arrow') return { id:uid(), type:'arrow', color:s.color, size:s.size, x1:s.x1, y1:s.y1, x2:s.x2, y2:s.y2 };
+          if (s.tool==='rect')   return { id:uid(), type:'rect',  color:s.color, size:s.size, x:s.x, y:s.y, w:s.w, h:s.h };
+          if (s.tool==='arrow')  return { id:uid(), type:'arrow', color:s.color, size:s.size, x1:s.x1, y1:s.y1, x2:s.x2, y2:s.y2 };
           if (s.tool==='pen' || s.tool==='eraser') return { id:uid(), type:'pen', color:s.color, size:s.size, eraser:(s.tool==='eraser'), points:s.points };
           return null;
         }).filter(Boolean);
       }
-      if (parsed?.items) { items.splice(0, items.length, ...parsed.items); }
+
+      if (parsed?.items) items.splice(0, items.length, ...parsed.items);
+
       if (parsed?.notes) {
-        notes.splice(0, notes.length, ...parsed.notes);
+        const migrated = parsed.notes.map(n => {
+          if (typeof n.x === 'number' && typeof n.y === 'number') return n; // new schema
+          const x = (n.xPct ?? 0) * window.innerWidth  + window.scrollX;
+          const y = (n.yPct ?? 0) * window.innerHeight + window.scrollY;
+          return { x, y, text: n.text || '' };
+        });
+        notes.splice(0, notes.length, ...migrated);
         layoutNotes();
       }
+
       redraw();
     } catch(e){ console.warn('load failed', e); }
   };
 
   const exportPNG = () => {
+    const pageW = docW(), pageH = docH();
     const temp = document.createElement('canvas');
-    temp.width = cvs.width; temp.height = cvs.height;
+    temp.width = Math.floor(pageW * DPR);
+    temp.height = Math.floor(pageH * DPR);
     const tctx = temp.getContext('2d');
-    items.forEach(drawItem.bind({ctx:tctx}) || drawItem);
-    tctx.drawImage(cvs, 0, 0); 
+
+    // draw vectors
+    const drawItemOn = (tctx, it) => {
+      tctx.save();
+      if (it.type==='pen'){
+        tctx.globalCompositeOperation = (it.eraser) ? 'destination-out' : 'source-over';
+        tctx.strokeStyle = it.color; tctx.lineWidth = it.size * DPR;
+        tctx.beginPath(); tctx.moveTo(it.points[0].x, it.points[0].y);
+        for (let i=1;i<it.points.length;i++) tctx.lineTo(it.points[i].x, it.points[i].y);
+        tctx.stroke();
+      } else if (it.type==='rect'){
+        tctx.strokeStyle = it.color; tctx.lineWidth = it.size * DPR;
+        tctx.strokeRect(it.x, it.y, it.w, it.h);
+      } else if (it.type==='arrow'){
+        tctx.strokeStyle = it.color; tctx.lineWidth = it.size * DPR;
+        tctx.beginPath(); tctx.moveTo(it.x1, it.y1); tctx.lineTo(it.x2, it.y2); tctx.stroke();
+        const angle = Math.atan2(it.y2 - it.y1, it.x2 - it.x1);
+        const headLen = 10 * DPR + it.size * DPR * 1.5;
+        for (const a of [angle - Math.PI/7, angle + Math.PI/7]) {
+          tctx.beginPath(); tctx.moveTo(it.x2, it.y2);
+          tctx.lineTo(it.x2 - headLen*Math.cos(a), it.y2 - headLen*Math.sin(a)); tctx.stroke();
+        }
+      }
+      tctx.restore();
+    };
+
+    items.forEach(it => drawItemOn(tctx, it));
+
+    // draw notes
     tctx.font = `${13*DPR}px system-ui`;
     for (const n of notes) {
-      const x = n.xPct * innerWidth * DPR;
-      const y = n.yPct * innerHeight * DPR;
+      const x = n.x * DPR;
+      const y = n.y * DPR;
       const pad = 8 * DPR; const text = (n.text||'').split('\n');
       let w = 120 * DPR; let h = (text.length*18 + 12) * DPR;
       tctx.fillStyle = '#fff8a8'; tctx.strokeStyle='#e6d36a'; tctx.lineWidth = 1 * DPR;
@@ -474,6 +536,7 @@
       tctx.fillStyle = '#222';
       text.forEach((line,i)=> tctx.fillText(line, x+pad, y+pad + i*18*DPR));
     }
+
     const a = document.createElement('a'); a.download = 'dev-canvas.png'; a.href = temp.toDataURL('image/png'); a.click();
   };
 
@@ -494,7 +557,8 @@
       window.removeEventListener('mouseup', onUp);
       window.removeEventListener('mousedown', onDown);
       window.removeEventListener('resize', fit);
-      root.remove(); fab.remove();
+      ro?.disconnect();
+      root.remove(); bar.remove(); fab.remove();
       delete window.__devCanvas;
     }
   };
@@ -505,13 +569,19 @@
     if (msg?.type === "DEV_CANVAS_TOGGLE") api.toggle();
   });
 
+  // ---------- BINDINGS ----------
   window.addEventListener('mousedown', onDown);
   window.addEventListener('mousemove', onMove);
   window.addEventListener('mouseup', onUp);
   window.addEventListener('keydown', onKey);
-  window.addEventListener('resize', fit);
+  window.addEventListener('resize', fit); // window size changes
   fab.addEventListener('click', ()=>api.toggle());
 
- 
+  // Track document growth (lazy content, SPA changes)
+  const ro = new ResizeObserver(() => fit());
+  ro.observe(document.documentElement);
+  ro.observe(document.body);
+
+  // ---------- INIT ----------
   fit(); load(); sizeLabel(); updateCursors();
 })();
