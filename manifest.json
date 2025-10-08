@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Dev Canvas",
   "version": "1.1.0",
-  "description": "Draw, annotate, and add sticky notes on any webpage — only when you want to.",
+  "description": "Draw, add notes & text, and export annotations directly on any webpage. Toggle with Alt+Shift+D.",
   "permissions": ["scripting", "activeTab", "storage", "contextMenus"],
   "background": { "service_worker": "background.js" },
   "action": { "default_title": "Toggle Dev Canvas" },
