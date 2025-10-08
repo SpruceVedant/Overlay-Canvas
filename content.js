@@ -1,10 +1,11 @@
 (() => {
-  // If already loaded, just wire the message listener and bail.
+ 
   if (window.__devCanvas && window.__devCanvas.toggle) {
     chrome.runtime?.onMessage?.addListener((msg, _s, sendResponse) => {
-      if (msg?.type === "DEV_CANVAS_PING") sendResponse("pong");
-      if (msg?.type === "DEV_CANVAS_TOGGLE") window.__devCanvas.toggle();
-    });
+  if (msg?.type === "DEV_CANVAS_PING") { sendResponse("pong"); return; }
+  if (msg?.type === "DEV_CANVAS_TOGGLE") { api.toggle(); sendResponse("toggled"); }
+});
+
     return;
   }
 
@@ -12,9 +13,8 @@
   const KEY = 'devcanvas@' + location.origin + location.pathname;
   const Z = 2147483000;
 
-  // ---------- DOM ----------
+  
   const root = document.createElement('div');
-  // Page-anchored (scrolls with the page)
   Object.assign(root.style, {
     position: 'absolute',
     top: '0px',
@@ -39,7 +39,7 @@
   const bar = document.createElement('div');
   bar.setAttribute('data-devcanvas-ui','');
   Object.assign(bar.style, {
-    position:'fixed', // UI stays pinned for convenience
+    position:'fixed',
     top:'12px', left:'50%', transform:'translateX(-50%)',
     background:'rgba(22,22,26,.92)', color:'#fff', font:'12px system-ui, sans-serif',
     padding:'8px 10px', borderRadius:'12px', display:'flex', gap:'8px',
@@ -51,6 +51,7 @@
     <button data-b="eraser">🧽 Eraser</button>
     <button data-b="rect">▭ Rect</button>
     <button data-b="arrow">➤ Arrow</button>
+    <button data-b="text" title="Click to place text, type, Enter or Esc to commit">🅣 Text</button>
     <button data-b="note" title="Click to add note. Drag with Select (or Alt+Drag)">🗒️ Note</button>
     <span style="width:1px;height:18px;background:#444;margin:0 2px"></span>
     <button data-b="sizeDown">−</button>
@@ -72,6 +73,7 @@
     b.onmouseleave=()=>b.style.background='#2b2f36';
   });
   document.body.appendChild(bar);
+  bar.style.display = 'none'; 
 
   const fab = document.createElement('div');
   fab.setAttribute('data-devcanvas-ui','');
@@ -82,32 +84,30 @@
   });
   fab.title = 'Toggle Dev Canvas';
   document.body.appendChild(fab);
+  fab.style.display = 'none'; 
 
   // ---------- STATE ----------
   let active = false;
   let tool = 'select';
-  let color = '#ff4757', size = 6;
-
-  const items = [];   // vector items: {id,type,color,size,...} in PAGE coordinates
+  let color = '#ff4757', size = 6;             // size controls line width; for Text we map to font size
+  const items = [];                             // vector items in PAGE space
   const redoStack = [];
-  const notes = [];   // {x,y,text,_el} in PAGE coordinates
-  const selection = new Set(); // selected item ids
-
+  const notes = [];                             // {x,y,text,_el} (HTML notes)
+  const selection = new Set();
   let drawing = false, tmpStart=null, tmpRect=null, tmpArrow=null;
   let draggingNote = null, dragOff = {x:0,y:0};
   let draggingSel = false, dragSelStart = null;
-
+  let textEditor = null;                        // active text editor overlay
   const sizeLabel = () => (bar.querySelector('#sizeLabel').textContent = String(size));
   const uid = () => Math.random().toString(36).slice(2,9);
 
   // ---------- HELPERS ----------
   function updateCursors() {
     cvs.style.cursor =
-      (tool === 'pen' || tool === 'eraser' || tool === 'rect' || tool === 'arrow' || tool === 'note')
+      (tool === 'pen' || tool === 'eraser' || tool === 'rect' || tool === 'arrow' || tool === 'note' || tool === 'text')
         ? 'crosshair' : 'default';
     notes.forEach(n => { if (n._el) n._el.style.cursor = (tool==='select') ? 'move' : 'text'; });
   }
-
   function toast(msg) {
     const t = document.createElement('div');
     Object.assign(t.style, {
@@ -127,19 +127,17 @@
     const pageH = docH();
     root.style.width  = pageW + 'px';
     root.style.height = pageH + 'px';
-
     cvs.width  = Math.floor(pageW * DPR);
     cvs.height = Math.floor(pageH * DPR);
     cvs.style.width  = pageW + 'px';
     cvs.style.height = pageH + 'px';
-
     ctx.lineCap='round'; ctx.lineJoin='round';
     redraw(); layoutNotes();
   };
 
-  // convert client -> page coords; canvas is at (0,0) page space
+  // Map client to PAGE*DPR coordinates (canvas space)
   const pt = (e) => {
-    const r = cvs.getBoundingClientRect(); // r.left ~ -scrollX, r.top ~ -scrollY
+    const r = cvs.getBoundingClientRect();
     return { x:(e.clientX - r.left) * DPR, y:(e.clientY - r.top) * DPR };
   };
 
@@ -159,6 +157,18 @@
       let minx=Infinity,miny=Infinity,maxx=-Infinity,maxy=-Infinity;
       it.points.forEach(p=>{minx=Math.min(minx,p.x); miny=Math.min(miny,p.y); maxx=Math.max(maxx,p.x); maxy=Math.max(maxy,p.y);});
       return {x:minx,y:miny,w:maxx-minx,h:maxy-miny};
+    }
+    if (it.type==='text'){
+      ctx.save();
+      ctx.font = `${it.fontSize*DPR}px ${it.fontFamily}`;
+      ctx.textBaseline = 'top';
+      const metrics = ctx.measureText(it.text || '');
+      let w = metrics.width;
+      let h = (metrics.actualBoundingBoxAscent && metrics.actualBoundingBoxDescent)
+        ? (metrics.actualBoundingBoxAscent + metrics.actualBoundingBoxDescent)
+        : it.fontSize * 1.3 * DPR;
+      ctx.restore();
+      return { x: it.x, y: it.y, w, h };
     }
     return {x:0,y:0,w:0,h:0};
   }
@@ -187,6 +197,10 @@
         if (distToSeg(x,y,pts[i-1].x,pts[i-1].y,pts[i].x,pts[i].y) <= tol) return true;
       }
       return false;
+    }
+    if (it.type==='text'){
+      const r = bbox(it);
+      return x>=r.x-2 && x<=r.x+r.w+2 && y>=r.y-2 && y<=r.y+r.h+2;
     }
     return false;
   }
@@ -219,6 +233,11 @@
         ctx.beginPath(); ctx.moveTo(it.x2, it.y2);
         ctx.lineTo(it.x2 - headLen*Math.cos(a), it.y2 - headLen*Math.sin(a)); ctx.stroke();
       }
+    } else if (it.type==='text'){
+      ctx.fillStyle = it.color;
+      ctx.font = `${it.fontSize*DPR}px ${it.fontFamily}`;
+      ctx.textBaseline = 'top';
+      ctx.fillText(it.text, it.x, it.y);
     }
     ctx.restore();
   }
@@ -302,6 +321,86 @@
     setTimeout(()=>el.focus(), 0);
   };
 
+  // ---------- TEXT TOOL ----------
+  function fontSizeFromSize(s){ return Math.round(10 + s * 3); } // tweakable
+  function startTextEditor(pxCSS, pyCSS, existing){
+    // close previous editor
+    if (textEditor) finishTextEditor(true);
+
+    const editor = document.createElement('div');
+    editor.setAttribute('data-devcanvas-ui','');
+    Object.assign(editor.style, {
+      position:'absolute',
+      left: `${pxCSS}px`,
+      top: `${pyCSS}px`,
+      minWidth: '24px',
+      maxWidth: '70vw',
+      color: color,
+      fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto, sans-serif',
+      fontSize: `${existing?.fontSize ?? fontSizeFromSize(size)}px`,
+      lineHeight: '1.2',
+      background: 'transparent',
+      outline: 'none',
+      border: '1px dashed rgba(255,255,255,.35)',
+      padding: '2px 3px',
+      whiteSpace: 'pre-wrap',
+      pointerEvents: 'auto',
+      zIndex: Z+3
+    });
+    editor.contentEditable = 'true';
+    editor.textContent = existing?.text || '';
+    for (const t of ['mousedown','mouseup','click','dblclick','keydown','keypress','keyup']) {
+      editor.addEventListener(t, ev => ev.stopPropagation());
+    }
+
+    // commit on Enter (no Shift), or on Escape (cancel)
+    editor.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); finishTextEditor(false); }
+      if (e.key === 'Escape') { e.preventDefault(); finishTextEditor(true); }
+    });
+    document.body.appendChild(editor);
+    editor.focus();
+    const sel = window.getSelection(); const r = document.createRange();
+    r.selectNodeContents(editor); r.collapse(false); sel.removeAllRanges(); sel.addRange(r);
+
+    textEditor = { el: editor, existing, xCSS: pxCSS, yCSS: pyCSS };
+  }
+
+  function finishTextEditor(cancel){
+    if (!textEditor) return;
+    const { el, existing, xCSS, yCSS } = textEditor;
+    const txt = el.textContent.trim();
+    const fontPx = parseInt(el.style.fontSize, 10) || fontSizeFromSize(size);
+    const col = el.style.color || color;
+    el.remove(); textEditor = null;
+
+    if (cancel) return;
+    if (!txt) return;
+
+    if (existing) {
+      // update existing text item
+      existing.text = txt;
+      existing.fontSize = fontPx;
+      existing.color = col;
+      redraw();
+      return;
+    }
+
+    // New text item: store in canvas space (PAGE*DPR)
+    const x = Math.round((xCSS) * DPR);
+    const y = Math.round((yCSS) * DPR);
+    const it = { id: uid(), type: 'text', text: txt, color: col, fontSize: fontPx, fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto, sans-serif', x, y };
+    items.push(it);
+    redraw();
+  }
+
+  function editExistingTextItem(it){
+    // Convert canvas space to CSS px
+    const px = it.x / DPR;
+    const py = it.y / DPR;
+    startTextEditor(px, py, it);
+  }
+
   // ---------- EVENTS ----------
   const onDown = (e) => {
     if (!active || e.button!==0) return;
@@ -309,6 +408,9 @@
     if (e.target.closest('[data-devcanvas-note]')) return;
 
     const p = pt(e);
+
+    // If a text editor is open and we click elsewhere, commit it
+    if (textEditor) finishTextEditor(false);
 
     if (tool==='select'){
       const hit = topHit(p.x, p.y);
@@ -326,6 +428,19 @@
     }
 
     if (tool==='note') { addNoteAt(e.clientX, e.clientY); return; }
+
+    if (tool==='text'){
+      // If clicking on existing text, open editor on it. Else create new.
+      const hit = topHit(p.x, p.y);
+      if (hit && hit.type === 'text'){
+        editExistingTextItem(hit);
+      } else {
+        const pxCSS = window.scrollX + e.clientX;
+        const pyCSS = window.scrollY + e.clientY;
+        startTextEditor(pxCSS, pyCSS, null);
+      }
+      return;
+    }
 
     // drawing tools
     drawing = true; redoStack.length = 0; selection.clear();
@@ -356,6 +471,7 @@
         if (it.type==='rect'){ it.x = snapshot.x + dx; it.y = snapshot.y + dy; }
         if (it.type==='arrow'){ it.x1 = snapshot.x1 + dx; it.y1 = snapshot.y1 + dy; it.x2 = snapshot.x2 + dx; it.y2 = snapshot.y2 + dy; }
         if (it.type==='pen'){ it.points = snapshot.points.map(pt=>({x:pt.x+dx, y:pt.y+dy})); }
+        if (it.type==='text'){ it.x = snapshot.x + dx; it.y = snapshot.y + dy; }
       }
       redraw();
       return;
@@ -391,7 +507,7 @@
   };
 
   const onKey = (e) => {
-    // optional in-page toggle after injection
+    // toggle overlay (optional)
     if ((e.ctrlKey||e.metaKey) && e.key.toLowerCase()==='d'){ e.preventDefault(); api.toggle(); }
 
     const k = e.key.toLowerCase();
@@ -400,9 +516,16 @@
     if (k==='2'){ tool='eraser'; updateCursors(); }
     if (k==='3'){ tool='rect';   updateCursors(); }
     if (k==='4'){ tool='arrow';  updateCursors(); }
+    if (k==='t'){ tool='text';   updateCursors(); }   // Text hotkey
     if (k==='5'){ tool='note';   updateCursors(); }
 
-    if (k==='escape'){ selection.clear(); redraw(); }
+    // finish text editing with Esc
+    if (k==='escape'){
+      if (textEditor) { finishTextEditor(false); return; }
+      selection.clear(); redraw();
+    }
+
+    // delete selected items
     if ((k==='delete' || k==='backspace') && active){
       if (selection.size>0){
         for (const id of [...selection]) {
@@ -430,6 +553,7 @@
     if (id==='eraser'){ tool='eraser'; updateCursors(); return; }
     if (id==='rect')  { tool='rect';   updateCursors(); return; }
     if (id==='arrow') { tool='arrow';  updateCursors(); return; }
+    if (id==='text')  { tool='text';   updateCursors(); return; }
     if (id==='note')  { tool='note';   updateCursors(); return; }
 
     if (id==='sizeUp'){ size=Math.min(50, size+1); sizeLabel(); }
@@ -446,13 +570,13 @@
     if (id==='close'){ api.destroy(); }
   });
 
-  bar.querySelector('input[type=color]').addEventListener('input', (e)=>{ color = e.target.value; });
+  bar.querySelector('input[type=color]').addEventListener('input', (e)=>{ color = e.target.value; if (textEditor) textEditor.el.style.color = color; });
 
   // ---------- PERSISTENCE ----------
   const save = () => {
     try {
       const modelNotes = notes.map(n=>({x:n.x,y:n.y,text:n.text||''}));
-      const payload = { version: 7, items, notes:modelNotes };
+      const payload = { version: 8, items, notes:modelNotes };
       localStorage.setItem(KEY, JSON.stringify(payload));
       toast('Saved for this URL');
     } catch(e){ console.warn(e); toast('Save failed'); }
@@ -462,8 +586,7 @@
     const raw = localStorage.getItem(KEY); if(!raw) return;
     try {
       const parsed = JSON.parse(raw);
-
-      // migrate from old schema (strokes or note xPct/yPct)
+      // migrate old schema if needed
       if (parsed?.strokes && !parsed.items){
         parsed.items = parsed.strokes.map(s=>{
           if (s.tool==='rect')   return { id:uid(), type:'rect',  color:s.color, size:s.size, x:s.x, y:s.y, w:s.w, h:s.h };
@@ -472,12 +595,10 @@
           return null;
         }).filter(Boolean);
       }
-
       if (parsed?.items) items.splice(0, items.length, ...parsed.items);
-
       if (parsed?.notes) {
         const migrated = parsed.notes.map(n => {
-          if (typeof n.x === 'number' && typeof n.y === 'number') return n; // new schema
+          if (typeof n.x === 'number' && typeof n.y === 'number') return n;
           const x = (n.xPct ?? 0) * window.innerWidth  + window.scrollX;
           const y = (n.yPct ?? 0) * window.innerHeight + window.scrollY;
           return { x, y, text: n.text || '' };
@@ -485,7 +606,6 @@
         notes.splice(0, notes.length, ...migrated);
         layoutNotes();
       }
-
       redraw();
     } catch(e){ console.warn('load failed', e); }
   };
@@ -497,8 +617,7 @@
     temp.height = Math.floor(pageH * DPR);
     const tctx = temp.getContext('2d');
 
-    // draw vectors
-    const drawItemOn = (tctx, it) => {
+    const drawOn = (tctx, it) => {
       tctx.save();
       if (it.type==='pen'){
         tctx.globalCompositeOperation = (it.eraser) ? 'destination-out' : 'source-over';
@@ -518,11 +637,16 @@
           tctx.beginPath(); tctx.moveTo(it.x2, it.y2);
           tctx.lineTo(it.x2 - headLen*Math.cos(a), it.y2 - headLen*Math.sin(a)); tctx.stroke();
         }
+      } else if (it.type==='text'){
+        tctx.fillStyle = it.color;
+        tctx.font = `${it.fontSize*DPR}px ${it.fontFamily}`;
+        tctx.textBaseline = 'top';
+        tctx.fillText(it.text, it.x, it.y);
       }
       tctx.restore();
     };
 
-    items.forEach(it => drawItemOn(tctx, it));
+    items.forEach(it => drawOn(tctx, it));
 
     // draw notes
     tctx.font = `${13*DPR}px system-ui`;
@@ -541,43 +665,54 @@
   };
 
   // ---------- API + messaging ----------
-  const api = {
-    toggle(force){
-      const desired = (typeof force === 'boolean') ? force : !active;
-      active = desired;
-      root.style.display = active ? 'block' : 'none';
-      fab.style.opacity = active ? .7 : 1;
-      root.style.pointerEvents = active ? 'auto' : 'none';
-      updateCursors();
-      redraw();
-    },
-    destroy(){
-      window.removeEventListener('keydown', onKey);
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-      window.removeEventListener('mousedown', onDown);
-      window.removeEventListener('resize', fit);
-      ro?.disconnect();
-      root.remove(); bar.remove(); fab.remove();
-      delete window.__devCanvas;
-    }
-  };
+const api = {
+  toggle(force){
+    const desired = (typeof force === 'boolean') ? force : !active;
+    active = desired;
+
+    const disp = active ? 'block' : 'none';
+
+    // annotations layer
+    root.style.display = disp;
+    root.style.pointerEvents = active ? 'auto' : 'none';
+
+    // UI chrome — make sure the toolbar shows/hides with the canvas
+    bar.style.display = active ? 'flex' : 'none';
+    if (fab) fab.style.display = active ? 'block' : 'none';  // keep or remove if you want fab always visible
+
+    updateCursors();
+    redraw();
+  },
+  destroy(){
+    window.removeEventListener('keydown', onKey);
+    window.removeEventListener('mousemove', onMove);
+    window.removeEventListener('mouseup', onUp);
+    window.removeEventListener('mousedown', onDown);
+    window.removeEventListener('resize', fit);
+    ro?.disconnect?.();
+    if (textEditor) finishTextEditor(true);
+    root.remove(); bar.remove(); fab?.remove();
+    delete window.__devCanvas;
+  }
+};
+
   window.__devCanvas = api;
 
-  chrome.runtime?.onMessage?.addListener((msg, _s, sendResponse) => {
-    if (msg?.type === "DEV_CANVAS_PING") sendResponse("pong");
-    if (msg?.type === "DEV_CANVAS_TOGGLE") api.toggle();
-  });
+chrome.runtime?.onMessage?.addListener((msg, _s, sendResponse) => {
+  if (msg?.type === "DEV_CANVAS_PING") { sendResponse("pong"); return; }
+  if (msg?.type === "DEV_CANVAS_TOGGLE") { api.toggle(); sendResponse("toggled"); }
+});
+
 
   // ---------- BINDINGS ----------
   window.addEventListener('mousedown', onDown);
   window.addEventListener('mousemove', onMove);
   window.addEventListener('mouseup', onUp);
   window.addEventListener('keydown', onKey);
-  window.addEventListener('resize', fit); // window size changes
+  window.addEventListener('resize', fit);
   fab.addEventListener('click', ()=>api.toggle());
 
-  // Track document growth (lazy content, SPA changes)
+  // Keep canvas sized to document growth (SPA/lazy loads)
   const ro = new ResizeObserver(() => fit());
   ro.observe(document.documentElement);
   ro.observe(document.body);
