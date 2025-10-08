@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "Dev Canvas",
+  "name": "Annotio",
   "version": "1.1.0",
-  "description": "Draw, add notes & text, and export annotations directly on any webpage. Toggle with Alt+Shift+D.",
+  "description": "Smart, simple annotation. Draw, add notes & text, and export annotations directly on any webpage. Toggle with Alt+Shift+D.",
   "permissions": ["scripting", "activeTab", "storage", "contextMenus"],
   "background": { "service_worker": "background.js" },
   "action": { "default_title": "Toggle Dev Canvas" },
@@ -12,7 +12,7 @@
          "default": "Alt+Shift+D",
          "mac": "Alt+Shift+D"
       },
-      "description": "Toggle Dev Canvas on the current tab"
+      "description": "Annotate in a snap"
     }
   },
   "icons": { "128": "icons/icon128.png" }
