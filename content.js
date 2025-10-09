@@ -92,7 +92,7 @@
   let color = '#ff4757', size = 6;             // size controls line width; for Text we map to font size
   const items = [];                             
   const redoStack = [];
-  const notes = [];                             // {x,y,text,_el} (HTML notes)
+  const notes = [];                            
   const selection = new Set();
   let drawing = false, tmpStart=null, tmpRect=null, tmpArrow=null;
   let draggingNote = null, dragOff = {x:0,y:0};
