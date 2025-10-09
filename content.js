@@ -90,7 +90,7 @@
   let active = false;
   let tool = 'select';
   let color = '#ff4757', size = 6;             // size controls line width; for Text we map to font size
-  const items = [];                             // vector items in PAGE space
+  const items = [];                             
   const redoStack = [];
   const notes = [];                             // {x,y,text,_el} (HTML notes)
   const selection = new Set();
